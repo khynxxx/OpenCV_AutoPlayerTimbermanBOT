@@ -1,190 +1,296 @@
-"""
-Autoplayer para Timberman en BlueStacks.
-- Detección por HSV de 2 tipos de peces (obstáculos) + reloj
-- Calibrador interactivo de ROI (guarda en roi_config.json)
-- Hotkeys: 'p' pausa/reanuda, 'q' salir
-"""
-
-import time, json, sys
+import sys, time, json, argparse
 from pathlib import Path
-import cv2, numpy as np, pyautogui, keyboard
+
+import cv2
+import numpy as np
+import mss
+import pyautogui
+import keyboard
+
 try:
     import pygetwindow as gw
-except Exception:
+except ImportError:
     gw = None
 
 CONFIG_PATH = Path("roi_config.json")
 
-# --- HSV ranges ---
-# Pez 1 (cuerpo azul + espinas amarillas)
-FISH1_BLUE = {
-    "h_min": 95, "h_max": 120,
-    "s_min": 80, "s_max": 255,
-    "v_min": 80, "v_max": 255
-}
-FISH1_YELLOW = {
-    "h_min": 20, "h_max": 35,
-    "s_min": 120, "s_max": 255,
-    "v_min": 150, "v_max": 255
-}
+DEFAULT_FISH_HSV = dict(h_min=175, h_max=210, s_min=30, s_max=180, v_min=80, v_max=220)
+DEFAULT_CLOCK_HSV = dict(h_min=20, h_max=40, s_min=150, s_max=255, v_min=150, v_max=255)
 
-# Pez 2 
-FISH2_HSV_RANGE = {
-    "h_min": 100, "h_max": 120,
-    "s_min": 40, "s_max": 255,
-    "v_min": 40, "v_max": 255
-}
-
-# Reloj amarillo
-CLOCK_HSV_RANGE = {
-    "h_min": 20, "h_max": 45,
-    "s_min": 120, "s_max": 255,
-    "v_min": 150, "v_max": 255
-}
-
-# Teclas 
-KEY_LEFT = 'left'
+KEY_LEFT  = 'left'
 KEY_RIGHT = 'right'
 
-# Velocidad
-CPS = 17.0
-PRESS_INTERVAL = 0.7 / CPS
-BLOCK_ROWS = 2
-HIT_PIXEL_THRESHOLD = 100
+CPS            = 10.0
+PRESS_INTERVAL = 1.0 / CPS
 
-def is_bluestacks_active():
+DETECTION_ZONE_FRACTION = 1.0
+HIT_THRESHOLD = 60
+
+
+def is_bluestacks_active() -> bool:
+    title = ""
     if gw:
         try:
             aw = gw.getActiveWindow()
-            if aw and 'BlueStacks' in (aw.title or ''):
-                return True
-        except: pass
-    try:
-        title = pyautogui.getActiveWindowTitle()
-        if title and 'BlueStacks' in title:
-            return True
-    except: pass
-    return False
+            title = aw.title if aw else ""
+        except Exception:
+            pass
+    if not title:
+        try:
+            title = pyautogui.getActiveWindowTitle() or ""
+        except Exception:
+            pass
+    return "BlueStacks" in title or "bluestacks" in title.lower()
 
-def calibrate_roi_interactive():
-    print("\nCalibración: señala las 4 esquinas del tronco (no de la ventana).")
-    coords = []
-    for i, name in enumerate(["sup-izq", "sup-der", "inf-izq", "inf-der"], start=1):
-        print(f"[{i}/4] Mueve cursor a esquina {name} y presiona 'c'...")
-        keyboard.wait('c')
-        pos = pyautogui.position()
-        print(f" -> registrado: {pos}")
-        coords.append((pos.x, pos.y))
-        time.sleep(0.2)
-    xs, ys = [c[0] for c in coords], [c[1] for c in coords]
-    roi = {"left": min(xs), "top": min(ys),
-           "width": max(xs)-min(xs), "height": max(ys)-min(ys)}
-    roi['center_x'] = roi['left'] + roi['width']//2
-    roi['block_h'] = max(8, roi['height'] // BLOCK_ROWS)
-    cfg = {"roi": roi,
-           "fish1_blue": FISH1_BLUE,
-           "fish1_yellow": FISH1_YELLOW,
-           "fish2_hsv": FISH2_HSV_RANGE,
-           "clock_hsv": CLOCK_HSV_RANGE}
-    with open(CONFIG_PATH, 'w') as f:
-        json.dump(cfg, f, indent=2)
-    print(f"Configuración guardada en {CONFIG_PATH.resolve()}")
+
+def bgr_to_hsv_mask(bgr: np.ndarray,
+                    h_min, h_max, s_min, s_max, v_min, v_max) -> np.ndarray:
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    lo  = np.array([h_min, s_min, v_min], dtype=np.uint8)
+    hi  = np.array([h_max, s_max, v_max], dtype=np.uint8)
+    return cv2.inRange(hsv, lo, hi)
+
+
+def count_pixels(mask: np.ndarray, x, y, w, h) -> int:
+    return int(cv2.countNonZero(mask[y:y+h, x:x+w]))
+
+
+def calibrate_roi() -> dict:
+    print()
+    print("╔══════════════════════════════════════════╗")
+    print("║      CALIBRACIÓN DE ROI  (2 puntos)      ║")
+    print("╚══════════════════════════════════════════╝")
+    print()
+    print("  Coloca el cursor en la ESQUINA SUPERIOR-IZQUIERDA")
+    print("  del tronco (incluye un poco de margen a cada lado)")
+    print("  y presiona [c] ...")
+    keyboard.wait("c")
+    p1 = pyautogui.position()
+    print(f"  ✓ Punto 1: ({p1.x}, {p1.y})")
+    time.sleep(0.35)
+
+    print()
+    print("  Ahora coloca el cursor en la ESQUINA INFERIOR-DERECHA")
+    print("  y presiona [c] ...")
+    keyboard.wait("c")
+    p2 = pyautogui.position()
+    print(f"  ✓ Punto 2: ({p2.x}, {p2.y})")
+    time.sleep(0.35)
+
+    left   = min(p1.x, p2.x)
+    top    = min(p1.y, p2.y)
+    width  = abs(p2.x - p1.x)
+    height = abs(p2.y - p1.y)
+
+    if width < 20 or height < 20:
+        print("  ✗ Área demasiado pequeña, intenta de nuevo.\n")
+        return calibrate_roi()
+
+    cfg = {
+        "roi": {"left": left, "top": top, "width": width, "height": height},
+        "fish_hsv":  DEFAULT_FISH_HSV,
+        "clock_hsv": DEFAULT_CLOCK_HSV,
+    }
+    CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+    print()
+    print(f"  ROI guardada → left={left} top={top} w={width} h={height}")
+    print(f"  Archivo: {CONFIG_PATH.resolve()}")
+    print()
     return cfg
 
-def load_config():
+
+def load_config() -> dict | None:
     if CONFIG_PATH.exists():
-        with open(CONFIG_PATH, 'r') as f:
-            return json.load(f)
+        try:
+            cfg = json.loads(CONFIG_PATH.read_text())
+            print(f"Config cargada: {CONFIG_PATH.resolve()}")
+            return cfg
+        except Exception as e:
+            print(f"Error leyendo config: {e}")
     return None
 
-def mask_hsv_from_bgr(bgr_img, h_min, h_max, s_min, s_max, v_min, v_max):
-    hsv = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2HSV)
-    lower = np.array([h_min, s_min, v_min], dtype=np.uint8)
-    upper = np.array([h_max, s_max, v_max], dtype=np.uint8)
-    return cv2.inRange(hsv, lower, upper)
 
-def mask_present(mask, rect, threshold=HIT_PIXEL_THRESHOLD):
-    x, y, w, h = rect
-    sub = mask[y:y+h, x:x+w]
-    count = int(cv2.countNonZero(sub))
-    return count > threshold, count
+def get_hsv_ranges(cfg: dict):
+    fish = (
+        cfg.get("fish_hsv")
+        or cfg.get("fish1_blue")
+        or cfg.get("fish1_hsv")
+        or DEFAULT_FISH_HSV
+    )
+    extras = [r for r in [
+        cfg.get("fish2_hsv"),
+        cfg.get("fish2_yellow_hsv"),
+        cfg.get("fish1_yellow"),
+    ] if r is not None]
 
-def run_bot(cfg):
-    roi = cfg['roi']
-    fish1_blue, fish1_yellow = cfg['fish1_blue'], cfg['fish1_yellow']
-    fish2, clk = cfg['fish2_hsv'], cfg['clock_hsv']
-    left, top, width, height = roi['left'], roi['top'], roi['width'], roi['height']
-    block_h = roi['block_h']
+    clock = cfg.get("clock_hsv") or DEFAULT_CLOCK_HSV
+    return fish, extras, clock
 
-    left_block = (0, max(0, height - 2*block_h - 10), width//2 - 2, block_h)
-    right_block = (width//2 + 2, max(0, height - 2*block_h - 10), width//2 - 2, block_h)
 
-    print("\nBot iniciado. Hotkeys: 'p' pausa/resume, 'q' salir.")
-    paused, current_side, last_press = False, 'right', 0.0
+def run_bot(cfg: dict) -> "dict | None":
+    roi   = cfg["roi"]
+    left  = roi["left"]
+    top   = roi["top"]
+    width = roi["width"]
+    height= roi["height"]
 
-    try:
-        while True:
-            if keyboard.is_pressed('q'):
-                print("Saliendo.")
-                break
-            if keyboard.is_pressed('p'):
-                paused = not paused
-                print("Pausado." if paused else "Reanudado.")
-                time.sleep(0.5)
-            if paused or not is_bluestacks_active():
-                time.sleep(0.1)
-                continue
+    fish_hsv, extras, clock_hsv = get_hsv_ranges(cfg)
+    monitor = {"left": left, "top": top, "width": width, "height": height}
 
-            img = pyautogui.screenshot(region=(left, top, width, height))
-            frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+    num_blocks   = 6
+    block_h      = max(10, height // num_blocks)
+    half         = width // 2
 
-            # Fish1 = azul + amarillo
-            fish1_mask_blue   = mask_hsv_from_bgr(frame, **fish1_blue)
-            fish1_mask_yellow = mask_hsv_from_bgr(frame, **fish1_yellow)
-            fish1_mask        = cv2.bitwise_or(fish1_mask_blue, fish1_mask_yellow)
+    scan_top    = max(0, int(height * 0.15))
+    scan_bottom = max(0, int(height * 0.15))
+    scan_y = scan_top
+    scan_h = height - scan_top - scan_bottom
 
-            # Fish2
-            fish2_mask = mask_hsv_from_bgr(frame, **fish2)
+    scan_left  = (0,      scan_y, half - 1, scan_h)
+    scan_right = (half+1, scan_y, half - 1, scan_h)
 
-            # Combinar peces
-            fish_mask = cv2.bitwise_or(fish1_mask, fish2_mask)
+    trigger_y = scan_y + scan_h - block_h
+    trigger_h = block_h
+    trig_left  = (0,      trigger_y, half - 1, trigger_h)
+    trig_right = (half+1, trigger_y, half - 1, trigger_h)
 
-            # Reloj
-            clock_mask = mask_hsv_from_bgr(frame, **clk)
+    print()
+    print("╔══════════════════════════════════════════════╗")
+    print("║  BOT ACTIVO                                  ║")
+    print("║  [p] pausa/resume   [d] ventana debug        ║")
+    print("║  [c] re-calibrar    [q] salir                ║")
+    print("╚══════════════════════════════════════════════╝")
+    print()
 
-            left_has, left_count   = mask_present(fish_mask, left_block)
-            right_has, right_count = mask_present(fish_mask, right_block)
-            left_clk, _  = mask_present(clock_mask, left_block)
-            right_clk, _ = mask_present(clock_mask, right_block)
+    paused       = False
+    debug        = False
+    current_side = "right"
+    last_press   = 0.0
 
-            decided_side = current_side
-            if left_clk and not left_has:
-                decided_side = 'left'
-            elif right_clk and not right_has:
-                decided_side = 'right'
-            else:
-                if current_side == 'left' and left_has:
-                    decided_side = 'right' if not right_has else ('left' if left_count < right_count else 'right')
-                elif current_side == 'right' and right_has:
-                    decided_side = 'left' if not left_has else ('left' if left_count < right_count else 'right')
+    with mss.mss() as sct:
+        try:
+            while True:
 
-            now = time.time()
-            if now - last_press >= PRESS_INTERVAL:
-                pyautogui.press(KEY_LEFT if decided_side == 'left' else KEY_RIGHT)
-                last_press, current_side = now, decided_side
+                if keyboard.is_pressed("q"):
+                    print("Saliendo.")
+                    cv2.destroyAllWindows()
+                    return None
 
-            time.sleep(0.005)
-    except KeyboardInterrupt:
-        print("Interrumpido por usuario.")
+                if keyboard.is_pressed("c"):
+                    cv2.destroyAllWindows()
+                    time.sleep(0.4)
+                    return calibrate_roi()
+
+                if keyboard.is_pressed("p"):
+                    paused = not paused
+                    print("⏸  Pausado." if paused else "▶  Reanudado.")
+                    time.sleep(0.4)
+
+                if keyboard.is_pressed("d"):
+                    debug = not debug
+                    print(f"🔍 Debug {'ON' if debug else 'OFF'}.")
+                    if not debug:
+                        cv2.destroyAllWindows()
+                    time.sleep(0.4)
+
+                if paused or not is_bluestacks_active():
+                    time.sleep(0.08)
+                    continue
+
+                raw   = sct.grab(monitor)
+                frame = cv2.cvtColor(np.array(raw), cv2.COLOR_BGRA2BGR)
+
+                fish_mask = bgr_to_hsv_mask(frame, **fish_hsv)
+                for extra in extras:
+                    fish_mask = cv2.bitwise_or(
+                        fish_mask, bgr_to_hsv_mask(frame, **extra)
+                    )
+                clock_mask = bgr_to_hsv_mask(frame, **clock_hsv)
+
+                lf_scan = count_pixels(fish_mask,  *scan_left)
+                rf_scan = count_pixels(fish_mask,  *scan_right)
+
+                lf_trig = count_pixels(fish_mask,  *trig_left)
+                rf_trig = count_pixels(fish_mask,  *trig_right)
+
+                lc = count_pixels(clock_mask, *scan_left)
+                rc = count_pixels(clock_mask, *scan_right)
+
+                l_danger = lf_trig > HIT_THRESHOLD
+                r_danger = rf_trig > HIT_THRESHOLD
+
+                l_clock  = lc > HIT_THRESHOLD
+                r_clock  = rc > HIT_THRESHOLD
+
+                decided = current_side
+
+                if l_danger and r_danger:
+                    decided = "left" if lf_scan <= rf_scan else "right"
+                elif l_danger:
+                    decided = "right"
+                elif r_danger:
+                    decided = "left"
+                else:
+                    if current_side == "right" and l_clock and lf_scan == 0:
+                        decided = "left"
+                    elif current_side == "left" and r_clock and rf_scan == 0:
+                        decided = "right"
+
+                if debug:
+                    dbg = frame.copy()
+                    x1,y1,w1,h1 = scan_left
+                    x2,y2,w2,h2 = scan_right
+                    cv2.rectangle(dbg, (x1,y1), (x1+w1,y1+h1), (255,180,0), 1)
+                    cv2.rectangle(dbg, (x2,y2), (x2+w2,y2+h2), (255,180,0), 1)
+                    tx1,ty1,tw1,th1 = trig_left
+                    tx2,ty2,tw2,th2 = trig_right
+                    cv2.rectangle(dbg, (tx1,ty1), (tx1+tw1,ty1+th1),
+                                  (0,0,255) if l_danger else (0,220,0), 2)
+                    cv2.rectangle(dbg, (tx2,ty2), (tx2+tw2,ty2+th2),
+                                  (0,0,255) if r_danger else (0,220,0), 2)
+                    info = f"Trig L:{lf_trig} R:{rf_trig} | Scan L:{lf_scan} R:{rf_scan} -> {decided.upper()}"
+                    cv2.putText(dbg, info, (2,14),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255,255,0), 1)
+                    cv2.imshow("Timberman debug - frame", dbg)
+                    cv2.imshow("Timberman debug - fish mask", fish_mask)
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                        cv2.destroyAllWindows()
+                        return None
+
+                now = time.time()
+                if now - last_press >= PRESS_INTERVAL:
+                    pyautogui.press(KEY_LEFT if decided == "left" else KEY_RIGHT)
+                    last_press   = now
+                    current_side = decided
+
+                time.sleep(0.004)
+
+        except KeyboardInterrupt:
+            print("Interrumpido por Ctrl-C.")
+            cv2.destroyAllWindows()
+            return None
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Timberman autoplayer")
+    parser.add_argument(
+        "--calibrate", action="store_true",
+        help="Fuerza nueva calibración aunque ya exista roi_config.json"
+    )
+    args = parser.parse_args()
+
+    cfg = None
+    if not args.calibrate:
+        cfg = load_config()
+
+    if cfg is None:
+        cfg = calibrate_roi()
+
+    while cfg is not None:
+        cfg = run_bot(cfg)
+
+    print("Bye!")
+
 
 if __name__ == "__main__":
-    cfg = load_config()
-    if cfg is None:
-        if not is_bluestacks_active():
-            print("Activa BlueStacks y vuelve a ejecutar para calibrar.")
-            sys.exit(1)
-        cfg = calibrate_roi_interactive()
-    else:
-        print(f"Configuración encontrada en {CONFIG_PATH.resolve()}")
-    run_bot(cfg)
-
+    main()
