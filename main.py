@@ -1,10 +1,8 @@
 """
-timberman_bot_roi_multipeces.py
 Autoplayer para Timberman en BlueStacks.
-- Detección por HSV de 2 tipos de peces (obstáculos) + reloj (bonus).
-- Fish1 ahora combina azul + amarillo en una sola máscara.
-- Calibrador interactivo de ROI (guarda en roi_config.json).
-- Hotkeys: 'p' pausa/reanuda, 'q' salir.
+- Detección por HSV de 2 tipos de peces (obstáculos) + reloj
+- Calibrador interactivo de ROI (guarda en roi_config.json)
+- Hotkeys: 'p' pausa/reanuda, 'q' salir
 """
 
 import time, json, sys
@@ -30,7 +28,7 @@ FISH1_YELLOW = {
     "v_min": 150, "v_max": 255
 }
 
-# Pez 2 (ejemplo más azulado, ajusta si no detecta bien)
+# Pez 2 
 FISH2_HSV_RANGE = {
     "h_min": 100, "h_max": 120,
     "s_min": 40, "s_max": 255,
@@ -44,7 +42,7 @@ CLOCK_HSV_RANGE = {
     "v_min": 150, "v_max": 255
 }
 
-# Teclas (Bluestacks mapeado)
+# Teclas 
 KEY_LEFT = 'left'
 KEY_RIGHT = 'right'
 
@@ -189,3 +187,4 @@ if __name__ == "__main__":
     else:
         print(f"Configuración encontrada en {CONFIG_PATH.resolve()}")
     run_bot(cfg)
+
