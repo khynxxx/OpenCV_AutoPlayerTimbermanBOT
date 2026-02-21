@@ -1,34 +1,24 @@
 {
   "roi": {
-    "left": 743,
-    "top": 282,
-    "width": 499,
-    "height": 522,
-    "center_x": 992,
-    "block_h": 74
+    "left": 292,
+    "top": 288,
+    "width": 212,
+    "height": 209
   },
-  "fish1_hsv": {
-    "h_min": 64,
-    "h_max": 212,
-    "s_min": 37,
-    "s_max": 100,
-    "v_min": 100,
-    "v_max": 100
-  },
-  "fish2_hsv": {
-    "h_min": 100,
-    "h_max": 120,
-    "s_min": 40,
-    "s_max": 255,
-    "v_min": 40,
-    "v_max": 255
+  "fish_hsv": {
+    "h_min": 175,
+    "h_max": 210,
+    "s_min": 30,
+    "s_max": 180,
+    "v_min": 80,
+    "v_max": 220
   },
   "clock_hsv": {
-    "h_min": 61,
-    "h_max": 61,
-    "s_min": 85,
-    "s_max": 85,
-    "v_min": 100,
+    "h_min": 20,
+    "h_max": 40,
+    "s_min": 150,
+    "s_max": 255,
+    "v_min": 150,
     "v_max": 255
   }
 }
